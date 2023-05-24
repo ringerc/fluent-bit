@@ -20,7 +20,9 @@ if(FLB_WINDOWS_DEFAULTS)
   set(FLB_AWS                   Yes)
   set(FLB_HTTP_SERVER           Yes)
   set(FLB_METRICS               Yes)
-  set(FLB_CONFIG_YAML           No)
+  if (NOT FLB_LIBYAML_DIR)
+    set(FLB_CONFIG_YAML         No)
+  endif ()
   set(FLB_WASM                  No)
   set(FLB_WAMRC                 No)
 
@@ -32,14 +34,14 @@ if(FLB_WINDOWS_DEFAULTS)
   set(FLB_IN_EXEC_WASI           No)
   set(FLB_IN_FORWARD            Yes)
   set(FLB_IN_HEALTH              No)
-  set(FLB_IN_HTTP                No)
+  set(FLB_IN_HTTP               Yes)
   set(FLB_IN_MEM                 No)
   set(FLB_IN_KMSG                No)
   set(FLB_IN_LIB                Yes)
   set(FLB_IN_RANDOM             Yes)
   set(FLB_IN_SERIAL              No)
   set(FLB_IN_STDIN               No)
-  set(FLB_IN_SYSLOG              No)
+  set(FLB_IN_SYSLOG             Yes)
   set(FLB_IN_TAIL               Yes)
   set(FLB_IN_TCP                Yes)
   set(FLB_IN_MQTT                No)
@@ -55,7 +57,10 @@ if(FLB_WINDOWS_DEFAULTS)
   set(FLB_IN_STATSD             Yes)
   set(FLB_IN_STORAGE_BACKLOG    Yes)
   set(FLB_IN_EMITTER            Yes)
+  set(FLB_IN_PODMAN_METRICS      No)
   set(FLB_IN_ELASTICSEARCH      Yes)
+  # disable calyptia fleet management for now
+  set(FLB_IN_CALYPTIA_FLEET     No)
 
   # OUTPUT plugins
   # ==============
@@ -113,9 +118,10 @@ find_package(FLEX)
 find_package(BISON)
 
 if (NOT (${FLEX_FOUND} AND ${BISON_FOUND}))
-  message(STATUS "flex and bison not found. Disable stream_processor building.")
-  set(FLB_STREAM_PROCESSOR No)
-  set(FLB_RECORD_ACCESSOR  No)
+  # The build will fail later if flex and bison are missing, so there's no
+  # point attempting to continue. There's no test cover for windows builds
+  # without FLB_PARSER anyway.
+  message(FATAL_ERROR "flex and bison not found, see DEVELOPER_GUIDE.md")
 endif()
 
 if (MSVC)

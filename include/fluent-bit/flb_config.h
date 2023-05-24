@@ -108,6 +108,7 @@ struct flb_config {
     void *dso_plugins;
 
     /* Plugins references */
+    struct mk_list processor_plugins;
     struct mk_list custom_plugins;
     struct mk_list in_plugins;
     struct mk_list parser_plugins;      /* not yet implemented */
@@ -334,6 +335,8 @@ enum conf_type {
 #ifdef FLB_HAVE_CHUNK_TRACE
 #define FLB_CONF_STR_ENABLE_CHUNK_TRACE      "Enable_Chunk_Trace"
 #endif /* FLB_HAVE_CHUNK_TRACE */
+
+#define FLB_CONF_STR_HOT_RELOAD        "Hot_Reload"
 
 /* DNS */
 #define FLB_CONF_DNS_MODE              "dns.mode"

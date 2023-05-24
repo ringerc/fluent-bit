@@ -35,6 +35,7 @@
 #include <fluent-bit/flb_metrics.h>
 #include <fluent-bit/flb_storage.h>
 #include <fluent-bit/flb_downstream.h>
+#include <fluent-bit/flb_plugin.h>
 #include <fluent-bit/flb_kv.h>
 #include <fluent-bit/flb_hash_table.h>
 #include <fluent-bit/flb_scheduler.h>
@@ -244,11 +245,13 @@ struct flb_input_instance *flb_input_new(struct flb_config *config,
         instance->p        = plugin;
         instance->tag      = NULL;
         instance->tag_len  = 0;
+        instance->tag_default = FLB_FALSE;
         instance->routable = FLB_TRUE;
         instance->data     = data;
         instance->storage  = NULL;
         instance->storage_type = -1;
         instance->log_level = -1;
+        instance->log_suppress_interval = -1;
         instance->runs_in_coroutine = FLB_FALSE;
 
         /* net */
@@ -340,7 +343,7 @@ struct flb_input_instance *flb_input_new(struct flb_config *config,
         mk_list_add(&instance->_head, &config->inputs);
 
         /* processor instance */
-        instance->processor = flb_processor_create(config, instance->name, instance);
+        instance->processor = flb_processor_create(config, instance->name, instance, FLB_PLUGIN_INPUT);
     }
 
     return instance;
@@ -476,6 +479,7 @@ int flb_input_set_property(struct flb_input_instance *ins,
     if (prop_key_check("tag", k, len) == 0 && tmp) {
         ins->tag     = tmp;
         ins->tag_len = flb_sds_len(tmp);
+        ins->tag_default = FLB_FALSE;
     }
     else if (prop_key_check("log_level", k, len) == 0 && tmp) {
         ret = flb_log_get_level_str(tmp);
@@ -484,6 +488,14 @@ int flb_input_set_property(struct flb_input_instance *ins,
             return -1;
         }
         ins->log_level = ret;
+    }
+    else if (prop_key_check("log_suppress_interval", k, len) == 0 && tmp) {
+        ret = flb_utils_time_to_seconds(tmp);
+        flb_sds_destroy(tmp);
+        if (ret == -1) {
+            return -1;
+        }
+        ins->log_suppress_interval = ret;
     }
     else if (prop_key_check("routable", k, len) == 0 && tmp) {
         ins->routable = flb_utils_bool(tmp);
@@ -1147,6 +1159,7 @@ int flb_input_instance_init(struct flb_input_instance *ins,
         /* Sanity check: all non-dynamic tag input plugins must have a tag */
         if (!ins->tag) {
             flb_input_set_property(ins, "tag", ins->name);
+            ins->tag_default = FLB_TRUE;
         }
 
         if (flb_input_is_threaded(ins)) {
@@ -1191,6 +1204,12 @@ int flb_input_instance_init(struct flb_input_instance *ins,
                 return -1;
             }
         }
+    }
+
+    /* initialize processors */
+    ret = flb_processor_init(ins->processor);
+    if (ret == -1) {
+        return -1;
     }
 
     return 0;

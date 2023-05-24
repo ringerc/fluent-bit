@@ -330,6 +330,11 @@ jobs:
       - staging-release-version-check
     permissions:
       contents: read
+    outputs:
+      windows-exe32-hash: steps.windows.outputs.WIN_32_EXE_HASH
+      windows-zip32-hash: steps.windows.outputs.WIN_32_ZIP_HASH
+      windows-exe64-hash: steps.windows.outputs.WIN_64_EXE_HASH
+      windows-zip64-hash: steps.windows.outputs.WIN_64_ZIP_HASH
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
@@ -346,7 +351,6 @@ jobs:
       shell: bash
 
     - name: Get Appveyor binaries
-      continue-on-error: true
       run: |
         ./packaging/appveyor-download.sh
       shell: bash
@@ -378,6 +382,7 @@ jobs:
       shell: bash
 
     - name: Provide output for documentation PR
+      id: windows
       # do not fail the build for this
       continue-on-error: true
       run: |
@@ -386,33 +391,14 @@ jobs:
           export WIN_32_ZIP_HASH=$(cat "$BASE_DIR/fluent-bit-${{ inputs.version }}-win32.zip.sha256"|awk '{print $1}')
           export WIN_64_EXE_HASH=$(cat "$BASE_DIR/fluent-bit-${{ inputs.version }}-win64.exe.sha256"|awk '{print $1}')
           export WIN_64_ZIP_HASH=$(cat "$BASE_DIR/fluent-bit-${{ inputs.version }}-win64.zip.sha256"|awk '{print $1}')
-          cat > windows-part.md << EOF
-          ## Installation Packages
-
-          The latest stable version is ${{ inputs.version }}, each version is available on the Github release as well as at `https://releases.fluentbit.io/<Major Version>/fluent-bit-<Full Version>-win[32|64].[exe|zip]`:
-
-          | INSTALLERS                                                                                       | SHA256 CHECKSUMS                                                 |
-          | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
-          | [fluent-bit-${{ inputs.version }}-win32.exe](https://releases.fluentbit.io/${{ needs.staging-release-version-check.outputs.major-version }}/fluent-bit-${{ inputs.version }}-win32.exe) | [$WIN_32_EXE_HASH](https://releases.fluentbit.io/2.0/fluent-bit-${{ inputs.version }}-win32.exe.sha256) |
-          | [fluent-bit-${{ inputs.version }}-win32.zip](https://releases.fluentbit.io/${{ needs.staging-release-version-check.outputs.major-version }}/fluent-bit-${{ inputs.version }}-win32.zip) | [$WIN_32_ZIP_HASH](https://releases.fluentbit.io/2.0/fluent-bit-${{ inputs.version }}-win32.zip.sha256) |
-          | [fluent-bit-${{ inputs.version }}-win64.exe](https://releases.fluentbit.io/${{ needs.staging-release-version-check.outputs.major-version }}/fluent-bit-${{ inputs.version }}-win64.exe) | [$WIN_64_EXE_HASH](https://releases.fluentbit.io/2.0/fluent-bit-${{ inputs.version }}-win64.exe.sha256) |
-          | [fluent-bit-${{ inputs.version }}-win64.zip](https://releases.fluentbit.io/${{ needs.staging-release-version-check.outputs.major-version }}/fluent-bit-${{ inputs.version }}-win64.zip) | [$WIN_64_ZIP_HASH](https://releases.fluentbit.io/2.0/fluent-bit-${{ inputs.version }}-win64.zip.sha256) |
-
-          To check the integrity, use `Get-FileHash` cmdlet on PowerShell.
-
-          ```powershell
-          PS> Get-FileHash fluent-bit-${{ inputs.version }}-win32.exe
-          ```
-          EOF
+          set | grep WIN_
+          echo WIN_32_EXE_HASH="$WIN_32_EXE_HASH" >> $GITHUB_OUTPUT
+          echo WIN_32_ZIP_HASH="$WIN_32_ZIP_HASH" >> $GITHUB_OUTPUT
+          echo WIN_64_EXE_HASH="$WIN_64_EXE_HASH" >> $GITHUB_OUTPUT
+          echo WIN_64_ZIP_HASH="$WIN_64_ZIP_HASH" >> $GITHUB_OUTPUT
       shell: bash
       env:
         BASE_DIR: release/${{ needs.staging-release-version-check.outputs.major-version }}
-
-    - name: Upload Windows docs
-      uses: actions/upload-artifact@v3
-      with:
-        name: windows-part
-        path: windows-part.md
 
   # Simple skopeo copy jobs to transfer image from staging to release registry with optional GPG key signing.
   # Unfortunately skopeo currently does not support Cosign: https://github.com/containers/skopeo/issues/1533
@@ -480,8 +466,8 @@ jobs:
         shell: bash
 
   staging-release-images-latest-tags:
-    # Only update latest tags for 2.0 releases
-    if: startsWith(github.event.inputs.version, '2.0') 
+    # Only update latest tags for 2.1 releases
+    if: startsWith(github.event.inputs.version, '2.1') 
     name: Release latest Linux container images
     runs-on: ubuntu-latest
     needs:
@@ -745,24 +731,24 @@ jobs:
     environment: release
     runs-on: ubuntu-latest
     steps:
-      - name: Release 1.9 - not latest
+      - name: Release 2.0 - not latest
         uses: softprops/action-gh-release@v1
-        if: startsWith(inputs.version, '1.9')
+        if: startsWith(inputs.version, '2.0')
         with:
           body: "https://fluentbit.io/announcements/v${{ inputs.version }}/"
           draft: false
-          generate_release_notes: false
+          generate_release_notes: true
           name: "Fluent Bit ${{ inputs.version }}"
           tag_name: v${{ inputs.version }}
-          target_commitish: '1.9'
+          target_commitish: '2.0'
 
-      - name: Release 2.0 and latest
+      - name: Release 2.1 and latest
         uses: softprops/action-gh-release@v1
-        if: startsWith(inputs.version, '2.')
+        if: startsWith(inputs.version, '2.1')
         with:
           body: "https://fluentbit.io/announcements/v${{ inputs.version }}/"
           draft: false
-          generate_release_notes: false
+          generate_release_notes: true
           name: "Fluent Bit ${{ inputs.version }}"
           tag_name: v${{ inputs.version }}
 
@@ -784,33 +770,34 @@ jobs:
           ref: 2.0
           token: ${{ secrets.GH_PA_TOKEN }}
 
-      - name: Release 2.0 and latest
+      - name: Release 2.1 and latest
         if: startsWith(inputs.version, '2.1')
         uses: actions/checkout@v3
         with:
           repository: fluent/fluent-bit-docs
           token: ${{ secrets.GH_PA_TOKEN }}
 
-      - name: Update container tags
+      - name: Ensure we have the script we need
         run: |
-          sed -i -e '/| Tag(s).*$/a | ${{ inputs.version }}-debug | x86\_64, arm64v8, arm32v7 | Release [v${{ inputs.version }}](https://fluentbit.io/announcements/v${{ inputs.version }}/) |' installation/docker.md
-          sed -i -e '/| Tag(s).*$/a | ${{ inputs.version }} | x86\_64, arm64v8, arm32v7 | Debug images |' installation/docker.md
+          if [[ ! -f update-release-version-docs.sh ]] ; then
+            git checkout update-release-version-docs.sh -- master
+          fi
         shell: bash
 
-      - name: Download Windows part
-        uses: actions/download-artifact@v3
-        with:
-          name: windows-part
-
-      - name: Update Windows version
+      - name: Update versions
+        # Uses https://github.com/fluent/fluent-bit-docs/blob/master/update-release-version-docs.sh
         run: |
-          # Remove old info
-          sed -i '/## Installation Packages/,/## Installing from ZIP archive/{//p;d;}' installation/windows.md
-          # Add new info (from previous job) at the end for simplicity
-          cat windows-part.md >> installation/windows.md
+          ./update-release-version-docs.sh
         shell: bash
+        env:
+          NEW_VERSION: ${{ inputs.version }}
+          WIN_32_EXE_HASH: ${{ needs.staging-release-source-s3.outputs.windows-exe32-hash }}
+          WIN_32_ZIP_HASH: ${{ needs.staging-release-source-s3.outputs.windows-zip32-hash }}
+          WIN_64_EXE_HASH: ${{ needs.staging-release-source-s3.outputs.windows-exe64-hash }}
+          WIN_64_ZIP_HASH: ${{ needs.staging-release-source-s3.outputs.windows-zip64-hash }}
 
       - name: Raise docs PR
+        id: cpr
         uses: peter-evans/create-pull-request@v5
         with:
           commit-message: 'release: update to v${{ inputs.version }}'
@@ -825,3 +812,65 @@ jobs:
             - Created by ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             - Auto-generated by create-pull-request: https://github.com/peter-evans/create-pull-request
           draft: false
+
+      - name: Check outputs
+        if: ${{ steps.cpr.outputs.pull-request-number }}
+        run: |
+          echo "Pull Request Number - ${{ steps.cpr.outputs.pull-request-number }}"
+          echo "Pull Request URL - ${{ steps.cpr.outputs.pull-request-url }}"
+
+  staging-release-create-version-update-pr:
+    name: Create version update PR for new release
+    needs: 
+      - staging-release-create-release
+    permissions:
+      contents: write
+      pull-requests: write
+    environment: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Release 2.0
+        if: startsWith(inputs.version, '2.0')
+        uses: actions/checkout@v3
+        with:
+          ref: 2.0
+
+      - name: Release 2.1 and latest
+        if: startsWith(inputs.version, '2.1')
+        uses: actions/checkout@v3
+
+      # Get the new version to use
+      - name: 'Get next minor version'
+        id: semvers
+        uses: "WyriHaximus/github-action-next-semvers@v1"
+        with:
+          version: ${{ inputs.version }}
+          strict: true
+
+      - run: ./update_version.sh
+        shell: bash
+        env:
+          NEW_VERSION: ${{ steps.semvers.outputs.patch }}
+          # Ensure we use the PR action to do the work
+          DISABLE_COMMIT: 'yes'
+
+      - name: Raise FB PR to update version
+        id: cpr
+        uses: peter-evans/create-pull-request@v5
+        with:
+          commit-message: 'release: update to ${{ inputs.version }}'
+          signoff: true
+          delete-branch: true
+          title: 'release: update to ${{ inputs.version }}'
+          labels: ci,automerge
+          body: |
+            Update release ${{ inputs.version }} version.
+            - Created by ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            - Auto-generated by create-pull-request: https://github.com/peter-evans/create-pull-request
+          draft: false
+
+      - name: Check outputs
+        if: ${{ steps.cpr.outputs.pull-request-number }}
+        run: |
+          echo "Pull Request Number - ${{ steps.cpr.outputs.pull-request-number }}"
+          echo "Pull Request URL - ${{ steps.cpr.outputs.pull-request-url }}"

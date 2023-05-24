@@ -46,6 +46,7 @@
 #include <fluent-bit/flb_input.h>
 #include <fluent-bit/flb_output.h>
 #include <fluent-bit/flb_filter.h>
+#include <fluent-bit/flb_processor.h>
 #include <fluent-bit/flb_engine.h>
 #include <fluent-bit/flb_str.h>
 #include <fluent-bit/flb_slist.h>
@@ -71,7 +72,7 @@ extern void win32_started(void);
 flb_ctx_t *ctx;
 struct flb_config *config;
 volatile sig_atomic_t exit_signal = 0;
-volatile sig_atomic_t flb_bin_restarting = 0;
+volatile sig_atomic_t flb_bin_restarting = FLB_RELOAD_IDLE;
 
 #ifdef FLB_HAVE_LIBBACKTRACE
 struct flb_stacktrace flb_st;
@@ -104,6 +105,7 @@ static void flb_help(int rc, struct flb_config *config)
     struct flb_input_plugin *in;
     struct flb_output_plugin *out;
     struct flb_filter_plugin *filter;
+    struct flb_processor_plugin *processor;
 
     printf("Usage: %s [OPTION]\n\n", prog_name);
     printf("%sAvailable Options%s\n", ANSI_BOLD, ANSI_RESET);
@@ -161,6 +163,12 @@ static void flb_help(int rc, struct flb_config *config)
             continue;
         }
         print_opt(in->name, in->description);
+    }
+
+    printf("\n%sProcessors%s\n", ANSI_BOLD, ANSI_RESET);
+    mk_list_foreach(head, &config->processor_plugins) {
+        processor = mk_list_entry(head, struct flb_processor_plugin, _head);
+        print_opt(processor->name, processor->description);
     }
 
     printf("\n%sFilters%s\n", ANSI_BOLD, ANSI_RESET);
@@ -598,8 +606,15 @@ static void flb_signal_handler(int signal)
         break;
     case SIGHUP:
 #ifndef FLB_HAVE_STATIC_CONF
-        /* reload by using same config files/path */
-        flb_reload(ctx, cf_opts);
+        if (flb_bin_restarting == FLB_RELOAD_IDLE) {
+            flb_bin_restarting = FLB_RELOAD_IN_PROGRESS;
+            /* reload by using same config files/path */
+            flb_reload(ctx, cf_opts);
+            flb_bin_restarting = FLB_RELOAD_IDLE;
+        }
+        else {
+            flb_utils_error(FLB_ERR_RELOADING_IN_PROGRESS);
+        }
         break;
 #endif
 #endif
@@ -971,7 +986,7 @@ int flb_main(int argc, char **argv)
             config->support_mode = FLB_TRUE;
             break;
         case 'Y':
-            config->enable_hot_reload = FLB_TRUE;
+            flb_cf_section_property_add(cf_opts, service->properties, FLB_CONF_STR_HOT_RELOAD, 0, "on", 0);
             break;
 #ifdef FLB_HAVE_CHUNK_TRACE
         case 'Z':

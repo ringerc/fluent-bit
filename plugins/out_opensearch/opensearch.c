@@ -25,6 +25,7 @@
 #include <fluent-bit/flb_time.h>
 #include <fluent-bit/flb_signv4.h>
 #include <fluent-bit/flb_aws_credentials.h>
+#include <fluent-bit/flb_gzip.h>
 #include <fluent-bit/flb_record_accessor.h>
 #include <fluent-bit/flb_ra_key.h>
 #include <fluent-bit/flb_log_event_decoder.h>
@@ -224,6 +225,45 @@ static flb_sds_t os_get_id_value(struct flb_opensearch *ctx,
     return tmp_str;
 }
 
+static int compose_index_header(struct flb_opensearch *ctx,
+                                int index_custom_len,
+                                char *logstash_index, size_t logstash_index_size,
+                                char *separator_str,
+                                struct tm *tm)
+{
+    int ret;
+    int len;
+    char *p;
+    size_t s;
+
+    /* Compose Index header */
+    if (index_custom_len > 0) {
+        p = logstash_index + index_custom_len;
+    } else {
+        p = logstash_index + flb_sds_len(ctx->logstash_prefix);
+    }
+    len = p - logstash_index;
+    ret = snprintf(p, logstash_index_size - len, "%s",
+                   separator_str);
+    if (ret > logstash_index_size - len) {
+        /* exceed limit */
+        return -1;
+    }
+    p += strlen(separator_str);
+    len += strlen(separator_str);
+
+    s = strftime(p, logstash_index_size - len,
+                 ctx->logstash_dateformat, tm);
+    if (s==0) {
+        /* exceed limit */
+        return -1;
+    }
+    p += s;
+    *p++ = '\0';
+
+    return 0;
+}
+
 /*
  * Convert the internal Fluent Bit data representation to the required
  * one by OpenSearch.
@@ -245,7 +285,6 @@ static int opensearch_format(struct flb_config *config,
     int write_op_upsert = FLB_FALSE;
     flb_sds_t ra_index = NULL;
     size_t s = 0;
-    char *p;
     char *index = NULL;
     char logstash_index[256];
     char time_formatted[256];
@@ -408,20 +447,15 @@ static int opensearch_format(struct flb_config *config,
 
         index = ctx->index;
         if (ctx->logstash_format == FLB_TRUE) {
-            /* Compose Index header */
-            if (index_custom_len > 0) {
-                p = logstash_index + index_custom_len;
+            ret = compose_index_header(ctx, index_custom_len,
+                                       &logstash_index[0], sizeof(logstash_index),
+                                       ctx->logstash_prefix_separator, &tm);
+            if (ret < 0) {
+                /* retry with default separator */
+                compose_index_header(ctx, index_custom_len,
+                                     &logstash_index[0], sizeof(logstash_index),
+                                     "-", &tm);
             }
-            else {
-                p = logstash_index + flb_sds_len(ctx->logstash_prefix);
-            }
-            *p++ = '-';
-
-            len = p - logstash_index;
-            s = strftime(p, sizeof(logstash_index) - len - 1,
-                         ctx->logstash_dateformat, &tm);
-            p += s;
-            *p++ = '\0';
             index = logstash_index;
             if (ctx->generate_id == FLB_FALSE) {
                 if (ctx->suppress_type_name) {
@@ -835,6 +869,9 @@ static void cb_opensearch_flush(struct flb_event_chunk *event_chunk,
     struct flb_connection *u_conn;
     struct flb_http_client *c;
     flb_sds_t signature = NULL;
+    int compressed = FLB_FALSE;
+    void *final_payload_buf = NULL;
+    size_t final_payload_size = 0;
 
     /* Get upstream connection */
     u_conn = flb_upstream_conn_get(ctx->u);
@@ -869,9 +906,26 @@ static void cb_opensearch_flush(struct flb_event_chunk *event_chunk,
     pack = (char *) out_buf;
     pack_size = out_size;
 
+    final_payload_buf = pack;
+    final_payload_size = pack_size;
+    /* Should we compress the payload ? */
+    if (ctx->compression == FLB_OS_COMPRESSION_GZIP) {
+        ret = flb_gzip_compress((void *) pack, pack_size,
+                                &out_buf, &out_size);
+        if (ret == -1) {
+            flb_plg_error(ctx->ins,
+                          "cannot gzip payload, disabling compression");
+        }
+        else {
+            compressed = FLB_TRUE;
+            final_payload_buf = out_buf;
+            final_payload_size = out_size;
+        }
+    }
+
     /* Compose HTTP Client request */
     c = flb_http_client(u_conn, FLB_HTTP_POST, ctx->uri,
-                        pack, pack_size, NULL, 0, NULL, 0);
+                        final_payload_buf, final_payload_size, NULL, 0, NULL, 0);
 
     flb_http_buffer_size(c, ctx->buffer_size);
 
@@ -896,6 +950,13 @@ static void cb_opensearch_flush(struct flb_event_chunk *event_chunk,
         flb_http_add_header(c, "User-Agent", 10, "Fluent-Bit", 10);
     }
 #endif
+
+    /* Set Content-Encoding of compressed payload */
+    if (compressed == FLB_TRUE) {
+        if (ctx->compression == FLB_OS_COMPRESSION_GZIP) {
+            flb_http_set_content_encoding_gzip(c);
+        }
+    }
 
     /* Map debug callbacks */
     flb_http_client_debug(c, ctx->ins->callback);
@@ -932,7 +993,7 @@ static void cb_opensearch_flush(struct flb_event_chunk *event_chunk,
                     /*
                      * If trace_error is set, trace the actual
                      * response from Elasticsearch explaining the problem.
-                     * Trace_Output can be used to see the request. 
+                     * Trace_Output can be used to see the request.
                      */
                     if (pack_size < 4000) {
                         flb_plg_debug(ctx->ins, "error caused by: Input\n%.*s\n",
@@ -965,6 +1026,11 @@ static void cb_opensearch_flush(struct flb_event_chunk *event_chunk,
     /* Cleanup */
     flb_http_client_destroy(c);
     flb_sds_destroy(pack);
+
+    if (final_payload_buf != pack) {
+        flb_free(final_payload_buf);
+    }
+
     flb_upstream_conn_release(u_conn);
     if (signature) {
         flb_sds_destroy(signature);
@@ -975,6 +1041,11 @@ static void cb_opensearch_flush(struct flb_event_chunk *event_chunk,
  retry:
     flb_http_client_destroy(c);
     flb_sds_destroy(pack);
+
+    if (final_payload_buf != pack) {
+        flb_free(final_payload_buf);
+    }
+
     flb_upstream_conn_release(u_conn);
     FLB_OUTPUT_RETURN(FLB_RETRY);
 }
@@ -1030,6 +1101,12 @@ static struct flb_config_map config_map[] = {
      "AWS Region of your Amazon OpenSearch Service cluster"
     },
     {
+     FLB_CONFIG_MAP_STR, "aws_profile", "default",
+     0, FLB_TRUE, offsetof(struct flb_opensearch, aws_profile),
+     "AWS Profile name. AWS Profiles can be configured with AWS CLI and are usually stored in "
+     "$HOME/.aws/ directory."
+    },
+    {
      FLB_CONFIG_MAP_STR, "aws_sts_endpoint", NULL,
      0, FLB_TRUE, offsetof(struct flb_opensearch, aws_sts_endpoint),
      "Custom endpoint for the AWS STS API, used with the AWS_Role_ARN option"
@@ -1064,6 +1141,11 @@ static struct flb_config_map config_map[] = {
      "and the date, e.g: If Logstash_Prefix is equals to 'mydata' your index will "
      "become 'mydata-YYYY.MM.DD'. The last string appended belongs to the date "
      "when the data is being generated"
+    },
+    {
+     FLB_CONFIG_MAP_STR, "logstash_prefix_separator", "-",
+     0, FLB_TRUE, offsetof(struct flb_opensearch, logstash_prefix_separator),
+     "Set a separator between logstash_prefix and date."
     },
     {
      FLB_CONFIG_MAP_STR, "logstash_prefix_key", NULL,
@@ -1173,6 +1255,13 @@ static struct flb_config_map config_map[] = {
      FLB_CONFIG_MAP_BOOL, "trace_error", "false",
      0, FLB_TRUE, offsetof(struct flb_opensearch, trace_error),
      "When enabled print the OpenSearch exception to stderr (for diag only)"
+    },
+
+    /* HTTP Compression */
+    {
+     FLB_CONFIG_MAP_STR, "compress", NULL,
+     0, FLB_TRUE, offsetof(struct flb_opensearch, compression_str),
+     "Set payload compression mechanism. Option available is 'gzip'"
     },
 
     /* EOF */

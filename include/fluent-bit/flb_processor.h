@@ -23,15 +23,45 @@
 #include <fluent-bit/flb_info.h>
 #include <fluent-bit/flb_sds.h>
 #include <fluent-bit/flb_config.h>
+#include <fluent-bit/flb_config_map.h>
 #include <fluent-bit/flb_config_format.h>
 
-#define FLB_PROCESSOR_LOGS      1
-#define FLB_PROCESSOR_METRICS   2
-#define FLB_PROCESSOR_TRACES    4
+#include <ctraces/ctraces.h>
+#include <cmetrics/cmetrics.h>
+
+/* Processor plugin result values */
+#define FLB_PROCESSOR_SUCCESS        0
+#define FLB_PROCESSOR_FAILURE       -1
+
+/* Processor event types */
+#define FLB_PROCESSOR_LOGS           1
+#define FLB_PROCESSOR_METRICS        2
+#define FLB_PROCESSOR_TRACES         4
 
 /* Type of processor unit: 'pipeline filter' or 'native unit' */
 #define FLB_PROCESSOR_UNIT_NATIVE    0
 #define FLB_PROCESSOR_UNIT_FILTER    1
+
+
+/* The current values mean the processor stack will
+ * wait for 2 seconds at most in 50 millisecond increments
+ * for each processor unit.
+ *
+ * This is the worst case scenario and in reality there will
+ * be no wait in 99.9% of the cases.
+ */
+#define FLB_PROCESSOR_LOCK_RETRY_LIMIT 40
+#define FLB_PROCESSOR_LOCK_RETRY_DELAY 50000
+
+/* These forward definitions are necessary in order to avoid
+ * inclussion conflicts.
+ */
+
+struct flb_log_event;
+struct flb_input_instance;
+struct flb_log_event_decoder;
+struct flb_log_event_encoder;
+struct flb_processor_instance;
 
 struct flb_processor_unit {
     int event_type;
@@ -44,6 +74,16 @@ struct flb_processor_unit {
      */
     void *ctx;
 
+    /* This lock is meant to cover the case where two output plugin
+     * worker threads flb_output_flush_create calls overlap which
+     * could cause flb_processor_run to be invoked by both of them
+     * at the same time with the same context.
+     *
+     * This could cause certain non thread aware filters such as
+     * filter_lua to modify internal structures leading to corruption
+     * and crashes.
+    */
+    pthread_mutex_t lock;
     /*
      * pipeline filters needs to be linked somewhere since the destroy
      * function will do the mk_list_del(). To avoid corruptions we link
@@ -75,13 +115,78 @@ struct flb_processor {
      * plugins this will contain the input instance context.
      */
     void *data;
+    int source_plugin_type;
 
     /* Fluent Bit context */
     struct flb_config *config;
 };
 
+struct flb_processor_plugin {
+    int flags;             /* Flags (not available at the moment */
+    char *name;            /* Processor short name               */
+    char *description;     /* Description                        */
 
-struct flb_processor *flb_processor_create(struct flb_config *config, char *name, void *data);
+    /* Config map */
+    struct flb_config_map *config_map;
+
+    /* Callbacks */
+    int (*cb_init) (struct flb_processor_instance *,
+                    void *,
+                    int,
+                    struct flb_config *);
+
+    int (*cb_process_logs) (struct flb_processor_instance *,
+                            struct flb_log_event_encoder *,
+                            struct flb_log_event *,
+                            const char *,
+                            int);
+
+    int (*cb_process_metrics) (struct flb_processor_instance *,
+                               struct cmt *,
+                               const char *,
+                               int);
+
+    int (*cb_process_traces) (struct flb_processor_instance *,
+                              struct ctrace *,
+                              const char *,
+                              int);
+
+    int (*cb_exit) (struct flb_processor_instance *);
+
+    struct mk_list _head;  /* Link to parent list (config->filters) */
+};
+
+struct flb_processor_instance {
+    int id;                                /* instance id              */
+    int log_level;                         /* instance log level       */
+    char name[32];                         /* numbered name            */
+    char *alias;                           /* alias name               */
+    void *context;                         /* Instance local context   */
+    void *data;
+    struct flb_processor_plugin *p;        /* original plugin          */
+    struct mk_list properties;             /* config properties        */
+    struct mk_list *config_map;            /* configuration map        */
+
+    struct flb_log_event_decoder *log_decoder;
+    struct flb_log_event_encoder *log_encoder;
+
+    /*
+     * CMetrics
+     * --------
+     */
+    struct cmt *cmt;                      /* parent context               */
+
+    /* Keep a reference to the original context this instance belongs to */
+    struct flb_config *config;
+};
+
+
+/* Processor stack */
+
+struct flb_processor *flb_processor_create(struct flb_config *config,
+                                           char *name,
+                                           void *source_plugin_instance,
+                                           int source_plugin_type);
 
 int flb_processor_is_active(struct flb_processor *proc);
 
@@ -102,5 +207,51 @@ void flb_processor_unit_destroy(struct flb_processor_unit *pu);
 int flb_processor_unit_set_property(struct flb_processor_unit *pu, const char *k, const char *v);
 
 int flb_processors_load_from_config_format_group(struct flb_processor *proc, struct flb_cf_group *g);
+
+/* Processor plugin instance */
+
+struct flb_processor_instance *flb_processor_instance_create(
+                                    struct flb_config *config,
+                                    const char *name,
+                                    void *data);
+
+void flb_processor_instance_destroy(
+        struct flb_processor_instance *ins);
+
+int flb_processor_instance_init(
+        struct flb_processor_instance *ins,
+        void *source_plugin_instance,
+        int source_plugin_type,
+        struct flb_config *config);
+
+void flb_processor_instance_exit(
+        struct flb_processor_instance *ins,
+        struct flb_config *config);
+
+void flb_processor_instance_set_context(
+        struct flb_processor_instance *ins,
+        void *context);
+
+int flb_processor_instance_check_properties(
+        struct flb_processor_instance *ins,
+        struct flb_config *config);
+
+int flb_processor_instance_set_property(
+        struct flb_processor_instance *ins,
+        const char *k, const char *v);
+
+const char *flb_processor_instance_get_property(
+                const char *key,
+                struct flb_processor_instance *ins);
+
+const char *flb_processor_instance_get_name(
+                struct flb_processor_instance *ins);
+
+static inline int flb_processor_instance_config_map_set(
+                    struct flb_processor_instance *ins,
+                    void *context)
+{
+    return flb_config_map_set(&ins->properties, ins->config_map, context);
+}
 
 #endif

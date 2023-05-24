@@ -173,6 +173,7 @@ struct flb_input_instance {
     pthread_mutex_t chunk_trace_lock;
 #endif /* FLB_HAVE_CHUNK_TRACE */
     int log_level;                       /* log level for this plugin    */
+    int log_suppress_interval;           /* log suppression interval     */
     flb_pipefd_t channel[2];             /* pipe(2) channel              */
     int runs_in_coroutine;               /* instance runs in coroutine ? */
     char name[32];                       /* numbered name (cpu -> cpu.0) */
@@ -184,6 +185,7 @@ struct flb_input_instance {
     /* Plugin properties */
     char *tag;                           /* Input tag for routing        */
     int tag_len;
+    int tag_default;                     /* is it using the default tag? */
 
     /* By default all input instances are 'routable' */
     int routable;

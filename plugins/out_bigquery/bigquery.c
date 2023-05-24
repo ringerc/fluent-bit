@@ -146,6 +146,8 @@ static int bigquery_jwt_encode(struct flb_bigquery *ctx,
     /* In mbedTLS cert length must include the null byte */
     len = strlen(secret) + 1;
 
+    sig_len = sizeof(sig);
+
     ret = flb_crypto_sign_simple(FLB_CRYPTO_PRIVATE_KEY,
                                  FLB_CRYPTO_PADDING_PKCS1,
                                  FLB_HASH_SHA256,
@@ -706,7 +708,8 @@ static int cb_bigquery_init(struct flb_output_instance *ins,
                                                                NULL,
                                                                NULL,
                                                                NULL,
-                                                               flb_aws_client_generator());
+                                                               flb_aws_client_generator(),
+                                                               NULL);
 
         if (!ctx->aws_provider) {
             flb_plg_error(ctx->ins, "Failed to create AWS Credential Provider");

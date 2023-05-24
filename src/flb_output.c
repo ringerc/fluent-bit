@@ -33,6 +33,7 @@
 #include <fluent-bit/flb_config.h>
 #include <fluent-bit/flb_macros.h>
 #include <fluent-bit/flb_utils.h>
+#include <fluent-bit/flb_plugin.h>
 #include <fluent-bit/flb_plugin_proxy.h>
 #include <fluent-bit/flb_http_client_debug.h>
 #include <fluent-bit/flb_output_thread.h>
@@ -221,6 +222,12 @@ static int flb_output_task_queue_flush_one(struct flb_task_queue *queue)
     queued_task = mk_list_entry_first(&queue->pending, struct flb_task_enqueued, _head);
     mk_list_del(&queued_task->_head);
     mk_list_add(&queued_task->_head, &queue->in_progress);
+
+    /*
+     * Remove temporary user now that task is out of singleplex queue.
+     * Flush will add back the user representing queued_task->out_instance if it succeeds.
+     */
+    flb_task_users_dec(queued_task->task, FLB_FALSE);
     ret = flb_output_task_flush(queued_task->task,
                                 queued_task->out_instance,
                                 queued_task->config);
@@ -250,6 +257,16 @@ int flb_output_task_singleplex_enqueue(struct flb_task_queue *queue,
 {
     int ret;
     int is_empty;
+
+    /*
+     * Add temporary user to preserve task while in singleplex queue.
+     * Temporary user will be removed when task is removed from queue.
+     *
+     * Note: if we fail to increment now, then the task may be prematurely
+     * deleted if the task's users go to 0 while we are waiting in the
+     * queue.
+     */
+    flb_task_users_inc(task);
 
     /* Enqueue task */
     ret = flb_output_task_queue_enqueue(queue, retry, task, out_ins, config);
@@ -700,7 +717,7 @@ struct flb_output_instance *flb_output_new(struct flb_config *config,
     mk_list_add(&instance->_head, &config->outputs);
 
     /* processor instance */
-    instance->processor = flb_processor_create(config, instance->name, instance);
+    instance->processor = flb_processor_create(config, instance->name, instance, FLB_PLUGIN_OUTPUT);
 
     /* Tests */
     instance->test_formatter.callback = plugin->test_formatter.callback;
@@ -1281,6 +1298,12 @@ int flb_output_init_all(struct flb_config *config)
         if (ret == -1) {
             flb_error("[output] could not start thread pool for '%s' plugin",
                       flb_output_name(ins));
+            return -1;
+        }
+
+        /* initialize processors */
+        ret = flb_processor_init(ins->processor);
+        if (ret == -1) {
             return -1;
         }
     }
